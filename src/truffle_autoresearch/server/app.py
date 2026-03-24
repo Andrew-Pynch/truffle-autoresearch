@@ -43,6 +43,23 @@ class _ServerState:
 _state: _ServerState | None = None
 
 
+def _save_server_state(port: int, token: str) -> None:
+    """Persist server PID, port, and token so CLI commands can reach us."""
+    import json
+    from truffle_autoresearch.config.paths import SERVER_STATE_PATH
+
+    SERVER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SERVER_STATE_PATH.write_text(
+        json.dumps({"pid": os.getpid(), "port": port, "token": token})
+    )
+
+
+def _clear_server_state() -> None:
+    from truffle_autoresearch.config.paths import SERVER_STATE_PATH
+
+    SERVER_STATE_PATH.unlink(missing_ok=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _state
@@ -55,9 +72,11 @@ async def lifespan(app: FastAPI):
         # Print so the user can copy it
         print(f"\n  Generated API token: {_state.api_token}\n")
     _state.executor = MachineExecutor(_state.fleet)
+    _save_server_state(_state.fleet.host.port, _state.api_token)
     logger.info("Control server ready — %d machine(s) in fleet", len(_state.fleet.machines))
     yield
     _state.executor.close()
+    _clear_server_state()
     _state = None
 
 
@@ -244,8 +263,16 @@ def researcher_start(machine: str, body: ResearcherStartRequest) -> dict[str, An
     if _state.executor.tmux_running(machine, TMUX_SESSION):
         raise HTTPException(status_code=409, detail=f"Researcher already running on {machine}")
 
-    # Placeholder command — Phase 4B will replace with the real research loop
-    _state.executor.tmux_start(machine, TMUX_SESSION, "echo 'researcher placeholder'")
+    # Launch the autoresearch loop for this target on the given machine
+    import sys
+
+    target_dir = _state.base_dir / body.target
+    cmd = (
+        f"{sys.executable} -m truffle_autoresearch.loop"
+        f" --target-dir {target_dir}"
+        f" --machine {machine}"
+    )
+    _state.executor.tmux_start(machine, TMUX_SESSION, cmd)
 
     return {"status": "started", "machine": machine, "target": body.target}
 

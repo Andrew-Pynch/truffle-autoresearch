@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -281,13 +282,156 @@ def list_targets() -> None:
         rprint("[dim]No builtin targets available.[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# Server state helpers (lazy-loaded)
+# ---------------------------------------------------------------------------
+def _load_server_state() -> dict | None:
+    """Load saved server state (pid, port, token) or return None."""
+    import json
+
+    from truffle_autoresearch.config.paths import SERVER_STATE_PATH
+
+    if not SERVER_STATE_PATH.exists():
+        return None
+    try:
+        return json.loads(SERVER_STATE_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _server_url(state: dict) -> str:
+    return f"http://localhost:{state['port']}"
+
+
+def _server_headers(state: dict) -> dict[str, str]:
+    return {"Authorization": f"Bearer {state['token']}"}
+
+
+def _start_server_background() -> dict:
+    """Start the control server as a background subprocess. Returns server state."""
+    import json
+    import subprocess
+    import sys
+    import time
+
+    from truffle_autoresearch.config.fleet import load_fleet_config
+    from truffle_autoresearch.config.paths import SERVER_STATE_PATH
+
+    fleet = load_fleet_config()
+    port = fleet.host.port
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "truffle_autoresearch.server.run"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # Wait for the server state file to appear (server writes it on startup)
+    for _ in range(30):
+        time.sleep(0.2)
+        if SERVER_STATE_PATH.exists():
+            try:
+                state = json.loads(SERVER_STATE_PATH.read_text())
+                if state.get("pid") == proc.pid:
+                    return state
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Fallback — file didn't appear, but process is running
+    return {"pid": proc.pid, "port": port, "token": ""}
+
+
+def _kill_server(state: dict) -> bool:
+    """Kill a server by PID. Returns True if killed."""
+    import signal
+
+    pid = state.get("pid")
+    if not pid:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Commands: run, stop, status, dashboard
+# ---------------------------------------------------------------------------
 @app.command()
 def run(
     target: str = typer.Argument(help="Target name to run"),
     machine: Optional[str] = typer.Option(None, help="Specific machine (default: all)"),
 ) -> None:
     """Start the autoresearch loop on the given target."""
-    rprint("[yellow]autoresearch run: not yet implemented[/yellow]")
+    import httpx
+
+    from truffle_autoresearch.config.fleet import ConfigError, load_fleet_config
+    from truffle_autoresearch.config.target import load_target_config
+
+    # Validate fleet
+    try:
+        fleet = load_fleet_config()
+    except ConfigError:
+        rprint("[red]No fleet config found. Run 'autoresearch init' first.[/red]")
+        raise typer.Exit(1)
+
+    # Validate target
+    target_dir = Path.cwd() / target
+    if not target_dir.is_dir() or not (target_dir / "target.yaml").exists():
+        rprint(f"[red]Target '{target}' not found in {Path.cwd()}[/red]")
+        rprint("[dim]Run 'autoresearch add-target --builtin toy-lm' to create one.[/dim]")
+        raise typer.Exit(1)
+    target_cfg = load_target_config(target_dir)
+
+    # Determine machines
+    if machine:
+        names = {m.name for m in fleet.machines}
+        if machine not in names:
+            rprint(f"[red]Unknown machine: {machine}. Available: {sorted(names)}[/red]")
+            raise typer.Exit(1)
+        machines_to_run = [machine]
+    else:
+        machines_to_run = [m.name for m in fleet.machines]
+
+    # Ensure server is running
+    state = _load_server_state()
+    if state is None:
+        rprint("[dim]Starting control server...[/dim]")
+        state = _start_server_background()
+        if not state.get("token"):
+            rprint("[red]Failed to start control server.[/red]")
+            raise typer.Exit(1)
+        rprint(f"[green]Server started on port {state['port']}[/green]")
+
+    # Start researchers
+    url = _server_url(state)
+    headers = _server_headers(state)
+    started = 0
+    for mname in machines_to_run:
+        try:
+            resp = httpx.post(
+                f"{url}/api/researcher/{mname}/start",
+                json={"target": target},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                rprint(f"  [green]✓[/green] Started researcher on [cyan]{mname}[/cyan]")
+                started += 1
+            elif resp.status_code == 409:
+                rprint(f"  [yellow]⚠[/yellow] Researcher already running on [cyan]{mname}[/cyan]")
+            else:
+                detail = resp.json().get("detail", resp.text)
+                rprint(f"  [red]✗[/red] Failed on {mname}: {detail}")
+        except httpx.ConnectError:
+            rprint(f"  [red]✗[/red] Cannot reach server for {mname}")
+
+    rprint()
+    rprint(f"[bold]Started researchers on {started}/{len(machines_to_run)} machine(s).[/bold]")
+    rprint(f"[dim]Target: {target_cfg.name} | Metric: {target_cfg.metric.name} ({target_cfg.metric.direction})[/dim]")
+    rprint("[dim]Run 'autoresearch status' to check progress.[/dim]")
 
 
 @app.command()
@@ -296,19 +440,157 @@ def stop(
     machine: Optional[str] = typer.Option(None, help="Specific machine (default: all)"),
 ) -> None:
     """Stop running autoresearch loops."""
-    rprint("[yellow]autoresearch stop: not yet implemented[/yellow]")
+    import httpx
+
+    from truffle_autoresearch.config.fleet import ConfigError, load_fleet_config
+
+    try:
+        fleet = load_fleet_config()
+    except ConfigError:
+        rprint("[red]No fleet config found.[/red]")
+        raise typer.Exit(1)
+
+    state = _load_server_state()
+    if state is None:
+        rprint("[yellow]No server running — nothing to stop.[/yellow]")
+        return
+
+    # Determine machines
+    if machine:
+        machines_to_stop = [machine]
+    else:
+        machines_to_stop = [m.name for m in fleet.machines]
+
+    # Stop researchers via server
+    url = _server_url(state)
+    headers = _server_headers(state)
+    stopped = 0
+    for mname in machines_to_stop:
+        try:
+            resp = httpx.post(
+                f"{url}/api/researcher/{mname}/stop",
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                rprint(f"  [green]✓[/green] Stopped researcher on [cyan]{mname}[/cyan]")
+                stopped += 1
+            elif resp.status_code == 404:
+                rprint(f"  [dim]–[/dim] No researcher running on [cyan]{mname}[/cyan]")
+            else:
+                detail = resp.json().get("detail", resp.text)
+                rprint(f"  [red]✗[/red] Failed on {mname}: {detail}")
+        except httpx.ConnectError:
+            rprint(f"  [yellow]⚠[/yellow] Cannot reach server for {mname}")
+
+    # Kill the server itself
+    if _kill_server(state):
+        rprint("[dim]Server stopped.[/dim]")
+    from truffle_autoresearch.config.paths import SERVER_STATE_PATH
+
+    SERVER_STATE_PATH.unlink(missing_ok=True)
+
+    rprint(f"\n[bold]Stopped researchers on {stopped}/{len(machines_to_stop)} machine(s).[/bold]")
 
 
 @app.command()
 def status() -> None:
     """Show status of all running experiments across the fleet."""
-    rprint("[yellow]autoresearch status: not yet implemented[/yellow]")
+    import httpx
+    from rich.console import Console
+    from rich.table import Table
+
+    from truffle_autoresearch.config.fleet import ConfigError, load_fleet_config
+
+    console = Console()
+
+    try:
+        fleet = load_fleet_config()
+    except ConfigError:
+        rprint("[red]No fleet config found. Run 'autoresearch init' first.[/red]")
+        raise typer.Exit(1)
+
+    state = _load_server_state()
+
+    # Try to get status from server
+    server_data: dict | None = None
+    server_reachable = False
+    if state:
+        try:
+            health = httpx.get(f"{_server_url(state)}/api/health", timeout=3)
+            server_reachable = health.status_code == 200
+        except httpx.ConnectError:
+            pass
+        if server_reachable:
+            try:
+                resp = httpx.get(
+                    f"{_server_url(state)}/api/status",
+                    headers=_server_headers(state),
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    server_data = resp.json()
+            except httpx.ConnectError:
+                pass
+
+    # Build the table
+    table = Table(title="Fleet Status", show_lines=True)
+    table.add_column("Machine", style="cyan", no_wrap=True)
+    table.add_column("GPU", style="green")
+    table.add_column("Experiments", justify="right")
+    table.add_column("Best Metric", justify="right", style="bold")
+    table.add_column("Researcher", justify="center")
+
+    for m in fleet.machines:
+        gpu_label = f"{m.gpu} ({m.vram_gb}GB)"
+        role = " [bold](host)[/bold]" if m.name == fleet.host.machine else ""
+
+        if server_data and m.name in server_data.get("machines", {}):
+            info = server_data["machines"][m.name]
+            if "error" in info:
+                table.add_row(
+                    m.name + role, gpu_label, "–", "–",
+                    "[red]error[/red]",
+                )
+            else:
+                exp_count = str(info.get("experiment_count", 0))
+                best = info.get("best_metric")
+                best_str = f"{best:.4f}" if best is not None else "–"
+                running = info.get("researcher_running", False)
+                status_str = "[green]running[/green]" if running else "[dim]stopped[/dim]"
+                table.add_row(m.name + role, gpu_label, exp_count, best_str, status_str)
+        else:
+            # Fallback — no server data for this machine
+            fallback_status = "[dim]idle[/dim]" if server_reachable else "[dim]unknown[/dim]"
+            table.add_row(
+                m.name + role, gpu_label, "–", "–",
+                fallback_status,
+            )
+
+    console.print(table)
+
+    if not state or not server_reachable:
+        rprint("\n[dim]Server not running. Start with 'autoresearch run <target>' or 'autoresearch dashboard'.[/dim]")
 
 
 @app.command()
 def dashboard() -> None:
     """Launch the web dashboard (FastAPI server + static frontend)."""
-    rprint("[yellow]autoresearch dashboard: not yet implemented[/yellow]")
+    from truffle_autoresearch.config.fleet import ConfigError, load_fleet_config
+
+    try:
+        fleet = load_fleet_config()
+    except ConfigError:
+        rprint("[red]No fleet config found. Run 'autoresearch init' first.[/red]")
+        raise typer.Exit(1)
+
+    port = fleet.host.port
+    rprint(f"[bold]Starting AutoResearch Dashboard on http://localhost:{port}[/bold]")
+    rprint("[dim]Press Ctrl+C to stop.[/dim]\n")
+
+    from truffle_autoresearch.server.run import start_server
+
+    start_server(port=port)
 
 
 @app.command()

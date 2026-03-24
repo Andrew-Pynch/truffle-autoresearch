@@ -24,3 +24,6 @@ DEFAULT_SERVER_PORT: int = 8420
 
 # Default time budget in seconds (from v1's 5-minute training budget)
 DEFAULT_TIME_BUDGET_SECONDS: int = 300
+
+# Server state file (PID, port, token)
+SERVER_STATE_PATH: Path = AUTORESEARCH_DIR / "server.json"
