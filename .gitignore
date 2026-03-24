@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+v1-initial-experimentation/autoresearch/run.log
+v1-initial-experimentation/autoresearch/results.tsv
+.env

@@ -1,0 +1,45 @@
+metadata:
+  name: AutoResearch Coordinator
+  bundle_id: dev.pynchlabs.autoresearch
+  description: |
+    Monitors and coordinates autonomous ML research experiments running
+    across multiple GPUs. Provides real-time experiment status, optimization
+    trajectories, and cross-platform comparisons.
+  icon_file: ./icon.png
+
+  foreground:
+    process:
+      cmd: ["python", "coordinator_foreground.py"]
+      working_directory: /
+      environment:
+        PYTHONUNBUFFERED: "1"
+
+  background:
+    process:
+      cmd: ["python", "coordinator_background.py"]
+      working_directory: /
+      environment:
+        PYTHONUNBUFFERED: "1"
+    default_schedule:
+      type: interval
+      interval:
+        duration: 10m
+        schedule:
+          daily_window: "00:00-23:59"
+
+steps:
+  - name: Install dependencies
+    type: bash
+    run: |
+      pip install --no-cache-dir httpx
+  - name: Copy application files
+    type: files
+    files:
+      - source: ./config.py
+        destination: ./config.py
+      - source: ./data_reader.py
+        destination: ./data_reader.py
+      - source: ./coordinator_foreground.py
+        destination: ./coordinator_foreground.py
+      - source: ./coordinator_background.py
+        destination: ./coordinator_background.py

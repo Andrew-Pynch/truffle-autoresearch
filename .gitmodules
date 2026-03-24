@@ -1,0 +1,6 @@
+[submodule "autoresearch"]
+	path = v1-initial-experimentation/autoresearch
+	url = https://github.com/Andrew-Pynch/autoresearch.git
+[submodule "truffile-sdk"]
+	path = v1-initial-experimentation/truffile-sdk
+	url = https://github.com/deepshard/truffile.git
