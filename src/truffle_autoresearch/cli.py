@@ -1,4 +1,5 @@
 """CLI entry point for autoresearch."""
+# deploy pipeline test
 
 from __future__ import annotations
 
