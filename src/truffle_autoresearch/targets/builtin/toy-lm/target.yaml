@@ -1,0 +1,14 @@
+name: toy-lm
+description: "Karpathy's toy language model — optimize val_bpb under a 5-minute training budget"
+mutable_file: train.py
+run_command: "uv run train.py"
+prepare_command: "uv run prepare.py"
+metric:
+  name: val_bpb
+  source: run.log
+  pattern: "val_bpb:\\s+(\\d+\\.\\d+)"
+  direction: minimize
+time_budget_seconds: 300
+agent:
+  model: opus
+  system_prompt_file: program.md

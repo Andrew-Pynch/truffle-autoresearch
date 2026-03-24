@@ -1,0 +1,33 @@
+# Target configuration for autoresearch.
+# Edit this file to define your research target.
+#
+# Required fields:
+#   name            — unique identifier for this target
+#   mutable_file    — the file the AI agent is allowed to modify
+#   run_command     — command to run one experiment (output captured to run.log)
+#   metric          — how to extract the optimization metric from run.log
+#
+# Optional fields:
+#   description     — human-readable description of the target
+#   prepare_command — one-time setup (e.g., download data)
+#   time_budget_seconds — wall-clock training budget (default: 300)
+#   agent           — agent configuration (model, system prompt)
+
+name: skeleton
+description: "A new research target — edit this description"
+
+mutable_file: train.py
+run_command: "python train.py"
+# prepare_command: "python prepare.py"
+
+metric:
+  name: score
+  source: run.log
+  pattern: "score:\\s+(\\d+\\.\\d+)"
+  direction: minimize  # or "maximize"
+
+time_budget_seconds: 300
+
+agent:
+  model: opus
+  system_prompt_file: program.md
