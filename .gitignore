@@ -3,3 +3,9 @@ __pycache__/
 v1-initial-experimentation/autoresearch/run.log
 v1-initial-experimentation/autoresearch/results.tsv
 .env
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+.venv/
